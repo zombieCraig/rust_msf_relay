@@ -22,9 +22,6 @@ use hex::FromHex;
 
 const VERSION: &str = "0.0.1";
 
-static CTL_KERN: libc::c_int = 1;
-static KERN_BOOTTIME: libc::c_int = 21;
-
 // Global state information
 struct RelayState {
   started_on: i64,
@@ -136,21 +133,6 @@ impl Packets {
 struct CanData {
   id: String,
   data: Vec<String>
-}
-
-fn getboottime() -> libc::timeval {
-    let mut mib = [CTL_KERN, KERN_BOOTTIME];
-    let mut boottime = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 0
-    };
-    let mut size: libc::size_t = std::mem::size_of_val(&boottime) as libc::size_t;
-    unsafe {
-        libc::sysctl(&mut mib[0], 2,
-               &mut boottime as *mut libc::timeval as *mut libc::c_void,
-               &mut size, std::ptr::null_mut(), 0);
-    }
-    boottime
 }
 
 #[get("/status")]

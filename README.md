@@ -1,11 +1,11 @@
-Rust Metasploit HW Relay
-------------------------
+Rust Metasploit HW Bridge Relay
+===============================
 
 This is an implementation of the [Metasploit Hardware bridge](https://blog.rapid7.com/2017/02/02/exiting-the-matrix/)
 written in Rust.  This project has two purposes:
 
-# Teach myself rust
-# Create a binary HW bridge that can be deployed remotely
+1. Teach myself rust
+2. Create a binary HW bridge that can be deployed remotely
 
 The first point will be obvious to any Rustaceans looking at the
 code.  It's really hard not to constantly refactor when learning rust,
