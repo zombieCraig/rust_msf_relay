@@ -15,12 +15,14 @@ use rocket::config::Config;
 use rocket_contrib::Json;
 use rocket::State;
 use std::sync::RwLock;
+use std::time::Duration;
 use chrono::prelude::*;
 use socketcan::{CANSocket, CANFrame, CANFilter};
 use clap::{Arg, App};
 use hex::FromHex;
 
 const VERSION: &str = "0.0.1";
+const HW_API_VERSION: &str = "0.0.3";
 
 // Global state information
 struct RelayState {
@@ -61,7 +63,7 @@ struct HWCapability {
 #[derive(Serialize)]
 struct Status {
   operational: u8,
-  hw_speciality: HWSpecialty,
+  hw_specialty: HWSpecialty,
   hw_capabilities: HWCapability,
   api_version: &'static str,
   fw_version: &'static str,
@@ -105,17 +107,19 @@ struct ISOTPData {
   data: String,
   timeout: Option<u32>,
   maxpkts: Option<u32>,
+  padding: Option<String>,
 }
 
+#[allow(non_snake_case)]
 #[derive(Serialize)]
 struct Packets {
   success: Option<bool>,
-  packets: Vec<CanData>
+  Packets: Vec<CanData>  // Cap to match MSF syntax
 }
 
 impl Packets {
   pub fn new() -> Packets {
-    Packets { success: None, packets: Vec::new(), }
+    Packets { success: None, Packets: Vec::new(), }
   }
 
   pub fn add_frame(&mut self, frame: CANFrame) {
@@ -124,24 +128,26 @@ impl Packets {
     for byte in frame.data() {
       data.push(format!("{:X}", byte));
     }
-    let packet = CanData { id: id, data: data };
-    self.packets.push(packet);
+    let packet = CanData { ID: id, DATA: data };
+    self.Packets.push(packet);
   }
 }
 
+// These need to be caps because MSF is Case sensitive
+#[allow(non_snake_case)]
 #[derive(Serialize)]
 struct CanData {
-  id: String,
-  data: Vec<String>
+  ID: String,
+  DATA: Vec<String>
 }
 
 #[get("/status")]
 fn status() -> Json<Status> {
   Json(Status {
     operational: 1,
-    hw_speciality: HWSpecialty { automotive: true },
+    hw_specialty: HWSpecialty { automotive: true },
     hw_capabilities: HWCapability { can: true },
-    api_version: "0.0.3",
+    api_version: HW_API_VERSION,
     fw_version: VERSION,
     hw_version: "0.0.1",
     device_name: "Rust MSFRelay"
@@ -155,7 +161,7 @@ fn statistics(state: State<RwLock<RelayState>>) -> Json<Stats> {
     //uptime: time::now().to_timespec().sec - getboottime().tv_sec,
     uptime: time::now().to_timespec().sec - state.started_on,
     packet_stats: state.packets_sent,
-    last_request: state.last_packet_sent.unwrap(),
+    last_request: state.last_packet_sent.unwrap_or(0),
     voltage: 0.0
   })
 }
@@ -175,7 +181,8 @@ fn timezone() -> Json<SystemTimezone> {
 }
 
 #[get("/automotive/supported_buses")]
-fn supported_buses(state: State<RelayState>) -> Json<Vec<BusName>> {
+fn supported_buses(state: State<RwLock<RelayState>>) -> Json<Vec<BusName>> {
+  let state = state.read().unwrap();
   Json(state.available_sockets
 	.iter()
 	.map(|s| { BusName { bus_name: s.to_string() } })
@@ -204,10 +211,18 @@ fn isotpsend_and_wait(state: State<RwLock<RelayState>>, bus_name: String, isotp_
   };
   let srcid = u32::from_str_radix(&isotp_data.srcid, 16).unwrap();
   let dstid = u32::from_str_radix(&isotp_data.dstid, 16).unwrap();
-  let frame_data = match Vec::from_hex(&isotp_data.data) {
+  let mut frame_data = match Vec::from_hex(&isotp_data.data) {
     Ok(d) => d,
     Err(_e) => return Json(packets),
   };
+  // Must insert size of data as first byte
+  let pkt_size = frame_data.len() as u8;
+  frame_data.insert(0, pkt_size);
+  // Truncate if the packet is now too big
+  // Note: this will change when we support sending larger ISO-TP packets
+  if frame_data.len() > 8 {
+    frame_data.truncate(8);
+  }
   let filter = CANFilter::new(dstid, 0x7FF).unwrap();
   if soc.set_filter(&[filter]).is_err() {
     return Json(packets)
@@ -220,6 +235,15 @@ fn isotpsend_and_wait(state: State<RwLock<RelayState>>, bus_name: String, isotp_
     None => 3,
     Some(p) => p
   };
+  match isotp_data.padding {
+    Some(p) => {
+      let padding_byte = u8::from_str_radix(&p, 16).unwrap();
+      while frame_data.len() < 8 {
+        frame_data.push(padding_byte);
+      }
+    },
+    None => {}
+  }
   let frame = match CANFrame::new(srcid, &frame_data, false, false) {
     Ok(f) => f,
     Err(_e) => return Json(packets),
@@ -234,11 +258,18 @@ fn isotpsend_and_wait(state: State<RwLock<RelayState>>, bus_name: String, isotp_
   let started = time::now().to_timespec().sec;
   let mut done = false;
   let mut current_count = 0;
+  if soc.set_read_timeout(Duration::new(0, timeout)).is_err() {
+    return Json(packets)
+  };
+  //soc.set_nonblocking(true);
   while !done {
-    let pkt = soc.read_frame().unwrap();
-    current_count += 1;
-    packets.add_frame(pkt);
-    if current_count >= maxpkts || (time::now().to_timespec().sec - started) >= timeout as i64 {
+    // Note: After the frist read it seems to block the socket and can no longer properly read
+    let pkt = soc.read_frame();
+    if pkt.is_ok() {
+      current_count += 1;
+      packets.add_frame(pkt.unwrap());
+    };
+    if current_count >= maxpkts || (time::now().to_timespec().sec - started) >= ((timeout as i64) / 1000) {
       done = true;
     }
   }
